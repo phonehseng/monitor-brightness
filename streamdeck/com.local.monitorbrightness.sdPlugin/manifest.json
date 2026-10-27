@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Name": "Monitor Brightness",
+  "Version": "1.0.0.0",
+  "Author": "phonehseng",
+  "URL": "https://github.com/phonehseng/monitor-brightness",
+  "Description": "Control external monitor brightness (DDC/CI) with a Stream Deck+ dial. Needs the Monitor Brightness tray app (brightness.py) running.",
+  "UUID": "com.local.monitorbrightness",
+  "Icon": "imgs/plugin",
+  "Category": "Monitor Brightness",
+  "CategoryIcon": "imgs/category",
+  "CodePath": "bin/plugin.js",
+  "SDKVersion": 2,
+  "Nodejs": { "Version": "20", "Debug": "disabled" },
+  "Software": { "MinimumVersion": "6.5" },
+  "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
+  "Actions": [
+    {
+      "Name": "Monitor Brightness",
+      "UUID": "com.local.monitorbrightness.dial",
+      "Icon": "imgs/action",
+      "Tooltip": "Turn to change monitor brightness, press to toggle a preset",
+      "Controllers": ["Encoder"],
+      "Encoder": {
+        "layout": "$B1",
+        "Icon": "imgs/dial",
+        "TriggerDescription": {
+          "Rotate": "Brightness (hold for 1%)",
+          "Push": "Toggle preset",
+          "Touch": "Re-read monitors"
+        }
+      },
+      "States": [{ "Image": "imgs/key" }],
+      "PropertyInspectorPath": "ui/inspector.html",
+      "UserTitleEnabled": false
+    }
+  ]
+}

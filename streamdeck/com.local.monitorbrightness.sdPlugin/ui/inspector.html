@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 4px 12px 12px 0; background: #2d2d2d; color: #d8d8d8; font: 9pt "Segoe UI", sans-serif; }
+  .row { display: flex; align-items: center; min-height: 32px; }
+  .row label { flex: 0 0 96px; text-align: right; padding-right: 12px; color: #969696; }
+  select, input[type=range] { flex: 1; min-width: 0; }
+  select { background: #3d3d3d; color: #d8d8d8; border: 0; border-radius: 3px; height: 26px; padding: 0 6px; font: inherit; }
+  input[type=range] { accent-color: #d8d8d8; }
+  .value { flex: 0 0 40px; text-align: right; }
+  .hint { margin: 8px 0 0 108px; color: #969696; line-height: 1.4; }
+  .hint.warn { color: #f5a623; }
+</style>
+</head>
+<body>
+  <div class="row"><label for="monitor">Monitor</label><select id="monitor"><option value="all">All displays</option></select></div>
+  <div class="row"><label for="step">Step per tick</label><input id="step" type="range" min="1" max="20"><span class="value" id="step-value"></span></div>
+  <div class="row"><label for="preset">Press sets</label><input id="preset" type="range" min="0" max="100" step="5"><span class="value" id="preset-value"></span></div>
+  <p class="hint" id="hint">Hold the dial while turning for 1% steps. Press again to go back. Tap the touch strip to re-read the monitors.</p>
+<script>
+const DEFAULTS = { monitor: "all", step: 5, preset: 20 };
+let socket, uuid, action, settings = { ...DEFAULTS };
+const $ = (id) => document.getElementById(id);
+
+// Stream Deck calls this when the panel loads.
+function connectElgatoStreamDeckSocket(port, inUUID, registerEvent, info, actionInfo) {
+  uuid = inUUID;
+  const actionData = JSON.parse(actionInfo);
+  action = actionData.action;
+  settings = { ...DEFAULTS, ...actionData.payload.settings };
+  socket = new WebSocket("ws://127.0.0.1:" + port);
+  socket.onopen = () => {
+    socket.send(JSON.stringify({ event: registerEvent, uuid }));
+    socket.send(JSON.stringify({ event: "sendToPlugin", action, context: uuid, payload: { request: "monitors" } }));
+  };
+  socket.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.event === "sendToPropertyInspector") showMonitors(msg.payload.monitors);
+  };
+  showSettings();
+}
+
+function showSettings() {
+  $("step").value = settings.step;
+  $("step-value").textContent = settings.step + "%";
+  $("preset").value = settings.preset;
+  $("preset-value").textContent = settings.preset + "%";
+}
+
+function showMonitors(monitors) {
+  const select = $("monitor");
+  select.length = 1; // keep "All displays"
+  if (!monitors) {
+    $("hint").textContent = "The Monitor Brightness tray app isn't running. Start brightness.py, then reopen this panel.";
+    $("hint").className = "hint warn";
+  }
+  for (const m of monitors || []) select.add(new Option(m.name, m.id));
+  if (![...select.options].some((o) => o.value === settings.monitor)) {
+    select.add(new Option("(disconnected monitor)", settings.monitor));
+  }
+  select.value = settings.monitor;
+}
+
+function save() {
+  settings = { monitor: $("monitor").value, step: Number($("step").value), preset: Number($("preset").value) };
+  showSettings();
+  socket.send(JSON.stringify({ event: "setSettings", context: uuid, payload: settings }));
+}
+
+$("monitor").addEventListener("change", save);
+$("step").addEventListener("input", save);
+$("preset").addEventListener("input", save);
+</script>
+</body>
+</html>
