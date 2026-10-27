@@ -38,6 +38,19 @@ pythonw brightness.py
 - Windows 11 puts new tray icons in the **^** overflow. Drag the sun icon out onto the
   taskbar to keep it next to the clock.
 
+### Start with Windows
+
+```
+py brightness.py autostart on     # or right-click the tray icon → Start with Windows
+py brightness.py autostart off
+py brightness.py autostart        # show the current setting
+```
+
+At sign-in, Windows runs a copy of the script kept in `%LOCALAPPDATA%\MonitorBrightness`,
+so startup keeps working even if you move or delete your clone. Whenever you start the
+tray app from your clone, it refreshes that copy, so startup always uses the latest version.
+You can also switch it off in Task Manager → Startup apps.
+
 It idles at about 30 MB of RAM and 0% CPU: nothing polls. A background thread per monitor
 sleeps until you change something, and only the latest value goes to the monitor.
 Errors are logged to `%LOCALAPPDATA%\MonitorBrightness\brightness.log`.

@@ -2,10 +2,11 @@
 """Change external monitor brightness over DDC/CI, using the monitorcontrol library.
 
 Usage:
-    pythonw brightness.py               run in the system tray (click the icon for sliders)
-    python brightness.py list           list detected monitors
-    python brightness.py get [MON]      print brightness
-    python brightness.py set VAL [MON]  set brightness to VAL (0-100), or change it by +N / -N
+    pythonw brightness.py                    run in the system tray (click the icon for sliders)
+    python brightness.py list                list detected monitors
+    python brightness.py get [MON]           print brightness
+    python brightness.py set VAL [MON]       set brightness to VAL (0-100), or change it by +N / -N
+    python brightness.py autostart [on|off]  start the tray app when you sign in to Windows
 
 MON is "all" (the default), a number from `list`, or part of a monitor's name.
 
@@ -23,6 +24,7 @@ import logging.handlers
 import math
 import os
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -44,6 +46,7 @@ except ImportError:
 log = logging.getLogger("brightness")
 
 APP_NAME = "MonitorBrightness"
+APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME  # log file and startup copy
 API_HOST, API_PORT = "127.0.0.1", 47823
 API_HEADER = "X-Monitor-Brightness"  # browsers can't add custom headers cross-site, so web pages can't call the API
 LUMINANCE = 0x10                     # VCP code for brightness
@@ -764,37 +767,51 @@ def _round_corners(hwnd):
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_COPY = APP_DIR / "brightness.py"
+
+
+def autostart_command():
+    """The command Windows runs at sign-in, or None if autostart is off."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            return winreg.QueryValueEx(key, APP_NAME)[0]
+    except OSError:
+        return None
 
 
 def autostart_enabled():
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.QueryValueEx(key, APP_NAME)
-            return True
-    except OSError:
-        return False
+    return autostart_command() is not None
 
 
 def set_autostart(enabled):
+    r"""Start the tray app when you sign in. Windows runs a copy of this script kept in
+    %LOCALAPPDATA%\MonitorBrightness, so startup keeps working if this folder is moved or deleted."""
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-        if enabled:
-            pythonw = Path(sys.executable).with_name("pythonw.exe")
-            exe = pythonw if pythonw.exists() else Path(sys.executable)
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe}" "{Path(__file__).resolve()}"')
-        else:
+        if not enabled:
             try:
                 winreg.DeleteValue(key, APP_NAME)
             except FileNotFoundError:
                 pass
+            return
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        if Path(__file__).resolve() != STARTUP_COPY.resolve():
+            shutil.copyfile(__file__, STARTUP_COPY)
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        exe = pythonw if pythonw.exists() else Path(sys.executable)
+        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe}" "{STARTUP_COPY}"')
 
 
 def run_tray():
     if not IS_WINDOWS:
         sys.exit("The tray app is Windows-only; use the list/get/set commands instead.")
-    folder = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
-    folder.mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(folder / "brightness.log", maxBytes=256_000, backupCount=1, encoding="utf-8")
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(APP_DIR / "brightness.log", maxBytes=256_000, backupCount=1, encoding="utf-8")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=[handler])
+    if autostart_enabled():
+        try:
+            set_autostart(True)  # keep the startup copy on the version you last ran
+        except OSError:
+            log.exception("Couldn't update the startup copy")
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor DPI aware: crisp text
     except OSError:
@@ -871,6 +888,15 @@ def cli_set(hub, value, target):
     return 1 if failures else 0
 
 
+def cli_autostart(state):
+    if not IS_WINDOWS:
+        sys.exit("Autostart is Windows-only.")
+    if state:
+        set_autostart(state == "on")
+    command = autostart_command()
+    print(f"Autostart is on. At sign-in Windows runs:\n  {command}" if command else "Autostart is off.")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                      epilog='MON is "all" (default), a number from `list`, or part of a monitor name.')
@@ -882,10 +908,14 @@ def main(argv=None):
     set_ = commands.add_parser("set", help="set brightness")
     set_.add_argument("value", help="0-100, or +N / -N to change it")
     set_.add_argument("monitor", nargs="?", default="all")
+    auto = commands.add_parser("autostart", help="start the tray app when you sign in to Windows")
+    auto.add_argument("state", nargs="?", choices=["on", "off"], help="leave out to show the current setting")
     args = parser.parse_args(argv)
 
     if args.command in (None, "tray"):
         return run_tray()
+    if args.command == "autostart":
+        return cli_autostart(args.state)
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     hub = Hub()
     hub.scan(force=True)
