@@ -6,6 +6,7 @@ Usage:
     python brightness.py list                list detected monitors
     python brightness.py get [MON]           print brightness
     python brightness.py set VAL [MON]       set brightness to VAL (0-100), or change it by +N / -N
+    python brightness.py install             add Start menu, desktop and Startup shortcuts
     python brightness.py autostart [on|off]  start the tray app when you sign in to Windows
 
 MON is "all" (the default), a number from `list`, or part of a monitor's name.
@@ -25,7 +26,6 @@ import logging.handlers
 import math
 import os
 import secrets
-import shutil
 import socket
 import subprocess
 import sys
@@ -770,50 +770,76 @@ def _round_corners(hwnd):
         pass
 
 
+SHORTCUT_NAME = "Monitor Brightness.lnk"
+SHORTCUT_PLACES = {  # Windows known-folder IDs
+    "start menu": "{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}",
+    "desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    "startup": "{B97D20BB-F46A-4C97-BA10-5E3608430854}",  # shortcuts here run at sign-in
+}
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-STARTUP_COPY = APP_DIR / "brightness.py"
 
 
-def autostart_command():
-    """The command Windows runs at sign-in, or None if autostart is off."""
+def shortcut_path(place):
+    folder_id = ctypes.create_string_buffer(16)
+    ctypes.oledll.ole32.CLSIDFromString(SHORTCUT_PLACES[place], folder_id)
+    folder = ctypes.c_wchar_p()
+    ctypes.oledll.shell32.SHGetKnownFolderPath(folder_id, 0, None, ctypes.byref(folder))
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            return winreg.QueryValueEx(key, APP_NAME)[0]
-    except OSError:
-        return None
+        return Path(folder.value) / SHORTCUT_NAME
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(folder)
+
+
+def create_shortcuts(places):
+    """Shortcuts that run this script's tray app (Windows Script Host writes the .lnk files)."""
+    script = Path(__file__).resolve()
+    icon = script.with_name("brightness.ico")
+    links = [shortcut_path(place) for place in places]
+    env = dict(os.environ, MB_LINKS="|".join(map(str, links)), MB_TARGET=str(_pythonw()), MB_ARGS=f'"{script}"',
+               MB_DIR=str(script.parent), MB_ICON=f"{icon},0" if icon.exists() else "")
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "$shell = New-Object -ComObject WScript.Shell; "
+                    "foreach ($path in $env:MB_LINKS.Split('|')) { "
+                    "$link = $shell.CreateShortcut($path); $link.TargetPath = $env:MB_TARGET; "
+                    "$link.Arguments = $env:MB_ARGS; $link.WorkingDirectory = $env:MB_DIR; "
+                    "if ($env:MB_ICON) { $link.IconLocation = $env:MB_ICON }; "
+                    "$link.Description = 'Monitor brightness sliders in the system tray'; $link.Save() }"],
+                   env=env, check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    return links
 
 
 def autostart_enabled():
-    return autostart_command() is not None
+    return shortcut_path("startup").exists()
 
 
 def set_autostart(enabled):
-    r"""Start the tray app when you sign in. Windows runs a copy of this script kept in
-    %LOCALAPPDATA%\MonitorBrightness, so startup keeps working if this folder is moved or deleted."""
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-        if not enabled:
-            try:
-                winreg.DeleteValue(key, APP_NAME)
-            except FileNotFoundError:
-                pass
-            return
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        if Path(__file__).resolve() != STARTUP_COPY.resolve():
-            shutil.copyfile(__file__, STARTUP_COPY)
-        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{_pythonw()}" "{STARTUP_COPY}"')
+    """Start the tray app at sign-in, via a shortcut in your Startup folder."""
+    if enabled:
+        create_shortcuts(["startup"])
+    else:
+        shortcut_path("startup").unlink(missing_ok=True)
+
+
+def _migrate_autostart():
+    """Earlier versions started from a Run registry entry pointing at a copy of the script in
+    %LOCALAPPDATA%. Swap that for the Startup shortcut, so the app doesn't start twice."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_ALL_ACCESS) as key:
+            winreg.QueryValueEx(key, APP_NAME)
+            winreg.DeleteValue(key, APP_NAME)
+    except OSError:
+        return  # nothing to migrate
+    set_autostart(True)
+    old_copy = APP_DIR / "brightness.py"
+    if old_copy.resolve() != Path(__file__).resolve():
+        old_copy.unlink(missing_ok=True)
+    log.info("Moved autostart from the registry to the Startup folder")
 
 
 def _pythonw():
     """pythonw.exe runs the tray app without a console window."""
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     return pythonw if pythonw.exists() else Path(sys.executable)
-
-
-def _in_app_container():
-    r"""True inside a packaged app's container (e.g. a terminal run by the Claude desktop app).
-    Windows quietly redirects AppData and registry writes made there to the app's private storage
-    under %LOCALAPPDATA%\Packages, so the startup entry wouldn't be seen at sign-in."""
-    return "\\packages\\" in str(STARTUP_COPY.resolve()).lower()
 
 
 def _tray_running():
@@ -824,23 +850,16 @@ def _tray_running():
         return False
 
 
-def _start_tray():
-    """Launch the startup copy in the background, detached from this terminal."""
-    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([str(_pythonw()), str(STARTUP_COPY)], cwd=APP_DIR, creationflags=flags, close_fds=True)
-
-
 def run_tray():
     if not IS_WINDOWS:
         sys.exit("The tray app is Windows-only; use the list/get/set commands instead.")
     APP_DIR.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(APP_DIR / "brightness.log", maxBytes=256_000, backupCount=1, encoding="utf-8")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=[handler])
-    if autostart_enabled():
-        try:
-            set_autostart(True)  # keep the startup copy on the version you last ran
-        except OSError:
-            log.exception("Couldn't update the startup copy")
+    try:
+        _migrate_autostart()
+    except Exception:
+        log.exception("Couldn't move autostart to the Startup folder")
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor DPI aware: crisp text
     except OSError:
@@ -939,26 +958,45 @@ def cli_set(hub, value, target):
     return 1 if failures else 0
 
 
+def cli_install(remove=False):
+    if not IS_WINDOWS:
+        sys.exit("Shortcuts are Windows-only.")
+    if remove:
+        for place in SHORTCUT_PLACES:
+            shortcut_path(place).unlink(missing_ok=True)
+        print("Removed the Start menu, desktop and Startup shortcuts.")
+        return 0
+    links = create_shortcuts(SHORTCUT_PLACES)
+    for link in links:
+        print(f"Created {link}")
+    return _after_setup(links)
+
+
 def cli_autostart(state):
     if not IS_WINDOWS:
         sys.exit("Autostart is Windows-only.")
     if state:
         set_autostart(state == "on")
-    command = autostart_command()
-    if not command:
-        print("Autostart is off.")
-        return 0
-    print(f"Autostart is on. At sign-in Windows runs:\n  {command}")
-    if _in_app_container():
-        print("\nWarning: this terminal runs inside another app's container, so Windows won't see this\n"
-              "startup entry. Run the command again from Windows Terminal (Start menu > Terminal).")
+    link = shortcut_path("startup")
+    print(f"Autostart is on: {link}" if link.exists() else "Autostart is off.")
+    return _after_setup([link]) if state == "on" else 0
+
+
+def _after_setup(links):
+    """Check Windows can see the new shortcuts, then start the tray app if it isn't running."""
+    if any("\\packages\\" in str(link.resolve()).lower() for link in links):
+        # Terminals inside another app's container (like the Claude desktop app's) can have
+        # their AppData writes redirected into that app's storage under %LOCALAPPDATA%\Packages.
+        print("\nWarning: this terminal runs inside another app's container, which keeps these shortcuts\n"
+              "private. Run the command again from Windows Terminal (Start menu > Terminal).")
         return 1
-    if state == "on":
-        if _tray_running():
-            print("The tray app is already running.")
-        else:
-            _start_tray()
-            print("Started the tray app.")
+    if _tray_running():
+        print("The tray app is already running.")
+    else:
+        # Opening the shortcut through Explorer starts the app on its own, like double-clicking
+        # it, instead of tying it to this terminal (which may close it when the terminal closes).
+        subprocess.Popen(["explorer.exe", str(links[0])])
+        print("Started the tray app.")
     return 0
 
 
@@ -973,12 +1011,16 @@ def main(argv=None):
     set_ = commands.add_parser("set", help="set brightness")
     set_.add_argument("value", help="0-100, or +N / -N to change it")
     set_.add_argument("monitor", nargs="?", default="all")
+    commands.add_parser("install", help="add Start menu, desktop and Startup shortcuts, then start the tray app")
+    commands.add_parser("uninstall", help="remove those shortcuts")
     auto = commands.add_parser("autostart", help="start the tray app when you sign in to Windows")
     auto.add_argument("state", nargs="?", choices=["on", "off"], help="leave out to show the current setting")
     args = parser.parse_args(argv)
 
     if args.command in (None, "tray"):
         return run_tray()
+    if args.command in ("install", "uninstall"):
+        return cli_install(remove=args.command == "uninstall")
     if args.command == "autostart":
         return cli_autostart(args.state)
     logging.basicConfig(level=logging.WARNING, format="%(message)s")

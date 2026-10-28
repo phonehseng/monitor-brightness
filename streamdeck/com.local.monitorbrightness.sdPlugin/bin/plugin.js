@@ -5,17 +5,23 @@
 
 const net = require("node:net");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
 
 const API = "http://127.0.0.1:47823";
 const HEADERS = { "Content-Type": "application/json", "X-Monitor-Brightness": "1" };
-const DEFAULTS = { monitor: "all", step: 5, preset: 20 };
+const DEFAULTS = { monitor: "all", step: 5 };
+// Made by "py brightness.py install"; pressing the dial while the tray app is offline opens it.
+const SHORTCUT = path.join(process.env.APPDATA || "", "Microsoft", "Windows", "Start Menu", "Programs", "Monitor Brightness.lnk");
 
 const args = {};
 for (let i = 2; i + 1 < process.argv.length; i += 2) args[process.argv[i].replace(/^-+/, "")] = process.argv[i + 1];
 
-const contexts = new Map(); // context -> { action, settings, restore }
+const contexts = new Map(); // context -> { action, settings }
 let state; // latest { instance, version, monitors } from the tray app; null while unreachable, undefined until first try
 let polling = false;
+let starting = false;
 
 // --- Stream Deck connection -------------------------------------------------------------------
 
@@ -49,7 +55,7 @@ function log(message) {
 const handlers = {
   willAppear({ action, context, payload }) {
     if (payload.controller !== "Encoder") return;
-    contexts.set(context, { action, settings: { ...DEFAULTS, ...payload.settings }, restore: null });
+    contexts.set(context, { action, settings: { ...DEFAULTS, ...payload.settings } });
     render(context);
     poll();
   },
@@ -62,7 +68,6 @@ const handlers = {
     const c = contexts.get(context);
     if (!c) return;
     c.settings = { ...DEFAULTS, ...payload.settings };
-    c.restore = null;
     render(context);
   },
 
@@ -74,21 +79,18 @@ const handlers = {
   },
 
   async dialDown({ context }) {
-    // Press toggles between the preset and whatever each monitor was at before.
     const c = contexts.get(context);
     if (!c) return;
-    const preset = Number(c.settings.preset);
-    const current = targets(c.settings.monitor).filter((m) => m.brightness !== null);
-    if (c.restore && current.length && current.every((m) => m.brightness === preset)) {
-      for (const m of c.restore) await change({ monitor: m.id, value: m.brightness });
-      c.restore = null;
-    } else {
-      c.restore = current.map(({ id, brightness }) => ({ id, brightness }));
-      await change({ monitor: c.settings.monitor, value: preset });
-    }
+    if (!state) return startTrayApp(context);
+    // Press cycles All displays -> each monitor -> All displays, skipping monitors without DDC/CI.
+    const choices = ["all", ...state.monitors.filter((m) => m.brightness !== null).map((m) => m.id)];
+    c.settings = { ...c.settings, monitor: choices[(choices.indexOf(c.settings.monitor) + 1) % choices.length] };
+    send("setSettings", context, c.settings); // remembered across restarts, and the settings panel follows
+    render(context);
   },
 
-  async touchTap() {
+  async touchTap({ context }) {
+    if (!state) return startTrayApp(context);
     await refresh(); // re-read the monitors, e.g. after using their own buttons
   },
 
@@ -104,9 +106,9 @@ const handlers = {
 
 // --- Tray app API -----------------------------------------------------------------------------
 
-async function api(path, body) {
+async function api(route, body) {
   const options = body === undefined ? { headers: HEADERS } : { method: "POST", headers: HEADERS, body: JSON.stringify(body) };
-  const response = await fetch(API + path, options);
+  const response = await fetch(API + route, options);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -161,6 +163,30 @@ async function poll() {
   }
 }
 
+async function startTrayApp(context) {
+  if (starting) return;
+  if (!fs.existsSync(SHORTCUT)) {
+    log(`Can't start the tray app: ${SHORTCUT} is missing. Run "py brightness.py install".`);
+    return send("showAlert", context);
+  }
+  starting = true;
+  for (const ctx of contexts.keys()) render(ctx);
+  // Explorer opens the shortcut, so the tray app runs on its own instead of inside Stream Deck's
+  // plugin process group (which Windows ends whenever Stream Deck restarts).
+  spawn("explorer.exe", [SHORTCUT], { detached: true, stdio: "ignore" })
+    .on("error", (err) => log(`Starting the tray app failed: ${err}`))
+    .unref();
+  for (let i = 0; i < 20 && !state; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await refresh();
+  }
+  starting = false;
+  if (!state) {
+    for (const ctx of contexts.keys()) render(ctx);
+    send("showAlert", context);
+  }
+}
+
 // --- Touch strip --------------------------------------------------------------------------------
 
 function targets(monitor) {
@@ -181,7 +207,7 @@ function render(context) {
   if (state === undefined) {
     [title, value, percent] = ["Brightness", "…", 0];
   } else if (!state) {
-    [title, value, percent] = ["Brightness", "Offline", 0];
+    [title, value, percent] = starting ? ["Brightness", "Starting…", 0] : ["Press to start", "Offline", 0];
   } else if (!targets(monitor).length) {
     [title, value, percent] = ["Not connected", "–", 0];
   } else {

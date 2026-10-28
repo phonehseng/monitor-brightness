@@ -5,6 +5,7 @@ from the system tray, the command line, or a Stream Deck+ dial.
 
 ```
 brightness.py          tray app + command line
+brightness.ico         icon for the shortcuts
 install_plugin.py      installs the Stream Deck plugin
 streamdeck/            the Stream Deck+ plugin (no npm needed)
 ```
@@ -21,16 +22,20 @@ streamdeck/            the Stream Deck+ plugin (no npm needed)
 git clone https://github.com/phonehseng/monitor-brightness.git
 cd monitor-brightness
 py -m pip install -r requirements.txt
+py brightness.py install
 ```
+
+`install` adds a **Monitor Brightness** shortcut to the Start menu, the desktop and your
+Startup folder (so it starts when you sign in), then starts the tray app. The shortcuts
+point at this folder, so keep the clone where it is (or run `install` again after moving
+it). To update, `git pull`. `py brightness.py uninstall` removes the shortcuts.
 
 Your monitors need **DDC/CI** turned on in their on-screen menu (usually on by default).
 Laptop built-in screens don't support DDC/CI.
 
 ## Tray app
 
-```
-pythonw brightness.py
-```
+Start it from the **Monitor Brightness** shortcut, or with `pythonw brightness.py`.
 
 - **Left-click** the sun icon: a flyout with a slider per monitor, plus "All displays".
   Drag, click or use the mouse wheel. Click elsewhere or press Esc to close.
@@ -40,21 +45,21 @@ pythonw brightness.py
 
 ### Start with Windows
 
+`install` turns this on. To change it later, use the tray icon's right-click →
+Start with Windows, Task Manager → Startup apps, or:
+
 ```
 py brightness.py autostart on     # also starts the tray app now if it isn't running
 py brightness.py autostart off
 py brightness.py autostart        # show the current setting
 ```
 
-Run these from a normal terminal such as Windows Terminal (or use the tray icon's
-right-click → Start with Windows). A terminal that runs inside another app's container,
-such as the Claude desktop app's, keeps AppData and registry changes private, so Windows
-never sees the startup entry. The command warns you if that happens.
+It works through the Monitor Brightness shortcut in your Startup folder. Older versions used a
+registry entry instead; the first time this version runs, it swaps that entry for the shortcut.
 
-At sign-in, Windows runs a copy of the script kept in `%LOCALAPPDATA%\MonitorBrightness`,
-so startup keeps working even if you move or delete your clone. Whenever you start the
-tray app from your clone, it refreshes that copy, so startup always uses the latest version.
-You can also switch it off in Task Manager → Startup apps.
+Run these commands from a normal terminal such as Windows Terminal. A terminal running
+inside another app's container, like the Claude desktop app's, may keep new AppData files
+private, so Windows never sees them. The commands warn you if that happens.
 
 It idles at about 30 MB of RAM and 0% CPU: nothing polls. A background thread per monitor
 sleeps until you change something, and only the latest value goes to the monitor.
@@ -75,20 +80,22 @@ py brightness.py set -10 2        # monitor #2 (from `list`), down 10
 
 ## Stream Deck+ dial
 
-1. Start the tray app (the plugin talks to it).
+1. Run `py brightness.py install` (the plugin talks to the tray app, and starts it from the
+   Start menu shortcut when it isn't running).
 2. `py install_plugin.py`: copies the plugin into Stream Deck and restarts the app.
 3. In Stream Deck, drag **Monitor Brightness → Monitor Brightness** onto a dial.
 
-| On the dial      | Does                                                                  |
-|------------------|-----------------------------------------------------------------------|
-| Turn             | Brightness up/down by the step (default 5%)                           |
-| Hold + turn      | 1% steps                                                              |
-| Press            | Jump to the preset (default 20%); press again to restore each monitor |
-| Tap touch strip  | Re-read the monitors (e.g. after using their own buttons)             |
+| On the dial      | Does                                                                      |
+|------------------|---------------------------------------------------------------------------|
+| Turn             | Brightness up/down by the step (default 5%)                               |
+| Hold + turn      | 1% steps                                                                  |
+| Press            | Switch between All displays and each monitor (skips ones without DDC/CI)  |
+| Tap touch strip  | Re-read the monitors (e.g. after using their own buttons)                 |
 
-In the dial's settings you can pick one monitor or all of them, plus the step and the
-preset. Put two dials side by side to control each monitor separately. The touch strip
-updates right away when you change brightness from the tray flyout.
+The touch strip shows which monitor the dial controls. When the tray app isn't running it
+says **Offline**: press the dial or tap the strip to start it. The dial's settings let you
+pick the monitor and step size too. The touch strip updates right away when you change
+brightness from the tray flyout.
 
 After editing anything in `streamdeck/`, run `py install_plugin.py` again.
 

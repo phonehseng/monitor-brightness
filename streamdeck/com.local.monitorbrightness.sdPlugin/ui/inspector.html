@@ -17,10 +17,9 @@
 <body>
   <div class="row"><label for="monitor">Monitor</label><select id="monitor"><option value="all">All displays</option></select></div>
   <div class="row"><label for="step">Step per tick</label><input id="step" type="range" min="1" max="20"><span class="value" id="step-value"></span></div>
-  <div class="row"><label for="preset">Press sets</label><input id="preset" type="range" min="0" max="100" step="5"><span class="value" id="preset-value"></span></div>
-  <p class="hint" id="hint">Hold the dial while turning for 1% steps. Press again to go back. Tap the touch strip to re-read the monitors.</p>
+  <p class="hint" id="hint">Press the dial to switch between All displays and each monitor. Hold it while turning for 1% steps. Tap the touch strip to re-read the monitors.</p>
 <script>
-const DEFAULTS = { monitor: "all", step: 5, preset: 20 };
+const DEFAULTS = { monitor: "all", step: 5 };
 let socket, uuid, action, settings = { ...DEFAULTS };
 const $ = (id) => document.getElementById(id);
 
@@ -38,40 +37,43 @@ function connectElgatoStreamDeckSocket(port, inUUID, registerEvent, info, action
   socket.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.event === "sendToPropertyInspector") showMonitors(msg.payload.monitors);
+    if (msg.event === "didReceiveSettings") { // e.g. the dial was pressed to switch monitor
+      settings = { ...DEFAULTS, ...msg.payload.settings };
+      showSettings();
+    }
   };
   showSettings();
 }
 
 function showSettings() {
+  const select = $("monitor");
+  if (![...select.options].some((o) => o.value === settings.monitor)) {
+    select.add(new Option("(disconnected monitor)", settings.monitor));
+  }
+  select.value = settings.monitor;
   $("step").value = settings.step;
   $("step-value").textContent = settings.step + "%";
-  $("preset").value = settings.preset;
-  $("preset-value").textContent = settings.preset + "%";
 }
 
 function showMonitors(monitors) {
   const select = $("monitor");
   select.length = 1; // keep "All displays"
   if (!monitors) {
-    $("hint").textContent = "The Monitor Brightness tray app isn't running. Start brightness.py, then reopen this panel.";
+    $("hint").textContent = "The Monitor Brightness tray app isn't running. Press the dial to start it, then reopen this panel.";
     $("hint").className = "hint warn";
   }
-  for (const m of monitors || []) select.add(new Option(m.name, m.id));
-  if (![...select.options].some((o) => o.value === settings.monitor)) {
-    select.add(new Option("(disconnected monitor)", settings.monitor));
-  }
-  select.value = settings.monitor;
+  for (const m of monitors || []) select.add(new Option(m.brightness === null ? m.name + " (no DDC/CI)" : m.name, m.id));
+  showSettings();
 }
 
 function save() {
-  settings = { monitor: $("monitor").value, step: Number($("step").value), preset: Number($("preset").value) };
+  settings = { monitor: $("monitor").value, step: Number($("step").value) };
   showSettings();
   socket.send(JSON.stringify({ event: "setSettings", context: uuid, payload: settings }));
 }
 
 $("monitor").addEventListener("change", save);
 $("step").addEventListener("input", save);
-$("preset").addEventListener("input", save);
 </script>
 </body>
 </html>
