@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import faulthandler
 import json
 import logging
 import logging.handlers
@@ -26,6 +27,7 @@ import os
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -280,6 +282,7 @@ class Hub:
             old, self.displays, self._signature = self.displays, displays, signature
             for display in old:
                 display.close()
+            log.info("Monitors: %s", ", ".join(f"{d.name} ({d.id})" for d in displays) or "none")
         self.notify()
         return True
 
@@ -739,6 +742,7 @@ class TrayApp:
         icon.update_menu()
 
     def _quit(self, icon, item):
+        log.info("Quit from the tray menu")
         icon.stop()
         self.call(self.root.quit)
 
@@ -796,9 +800,34 @@ def set_autostart(enabled):
         APP_DIR.mkdir(parents=True, exist_ok=True)
         if Path(__file__).resolve() != STARTUP_COPY.resolve():
             shutil.copyfile(__file__, STARTUP_COPY)
-        pythonw = Path(sys.executable).with_name("pythonw.exe")
-        exe = pythonw if pythonw.exists() else Path(sys.executable)
-        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe}" "{STARTUP_COPY}"')
+        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{_pythonw()}" "{STARTUP_COPY}"')
+
+
+def _pythonw():
+    """pythonw.exe runs the tray app without a console window."""
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    return pythonw if pythonw.exists() else Path(sys.executable)
+
+
+def _in_app_container():
+    r"""True inside a packaged app's container (e.g. a terminal run by the Claude desktop app).
+    Windows quietly redirects AppData and registry writes made there to the app's private storage
+    under %LOCALAPPDATA%\Packages, so the startup entry wouldn't be seen at sign-in."""
+    return "\\packages\\" in str(STARTUP_COPY.resolve()).lower()
+
+
+def _tray_running():
+    try:
+        api_request("/monitors", timeout=1)
+        return True
+    except OSError:
+        return False
+
+
+def _start_tray():
+    """Launch the startup copy in the background, detached from this terminal."""
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen([str(_pythonw()), str(STARTUP_COPY)], cwd=APP_DIR, creationflags=flags, close_fds=True)
 
 
 def run_tray():
@@ -828,15 +857,37 @@ def run_tray():
             log.error("Port %s is in use by another program", API_PORT)
         return
 
+    _log_crashes()
+    log.info("Started (pid %s) from %s", os.getpid(), Path(__file__).resolve())
     hub = Hub()
     hub.scan(force=True)
-    log.info("Started; monitors: %s", ", ".join(f"{d.name} ({d.id})" for d in hub.displays) or "none")
     app = TrayApp(hub)
     ApiHandler.hub = hub
     ApiHandler.show = staticmethod(lambda: app.call(app.show))
     # A long poll interval keeps the idle server thread asleep; requests still wake it instantly.
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 3600}, name="api", daemon=True).start()
     app.run()
+    log.info("Exited")
+
+
+def _log_crashes():
+    """pythonw has no console, so a fatal error would otherwise vanish. Python errors (from any
+    thread) go to brightness.log; native crashes and anything printed to stderr go to crash.log."""
+    path = APP_DIR / "crash.log"
+    big = path.exists() and path.stat().st_size > 1_000_000
+    stream = open(path, "w" if big else "a", encoding="utf-8", buffering=1)
+    stream.write(f"--- started {time.strftime('%Y-%m-%d %H:%M:%S')} (pid {os.getpid()})\n")
+    if sys.stderr is None:
+        sys.stderr = stream  # e.g. "Exception ignored in ..." messages and warnings
+    faulthandler.enable(stream)  # access violations, aborts: dumps every thread's Python stack
+
+    def thread_hook(args):
+        if not issubclass(args.exc_type, SystemExit):
+            name = args.thread.name if args.thread else "?"
+            log.critical("Uncaught error in thread %s", name, exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = lambda *exc: log.critical("Uncaught error", exc_info=exc)
+    threading.excepthook = thread_hook
 
 
 # --- Command line -------------------------------------------------------------------------------
@@ -894,7 +945,21 @@ def cli_autostart(state):
     if state:
         set_autostart(state == "on")
     command = autostart_command()
-    print(f"Autostart is on. At sign-in Windows runs:\n  {command}" if command else "Autostart is off.")
+    if not command:
+        print("Autostart is off.")
+        return 0
+    print(f"Autostart is on. At sign-in Windows runs:\n  {command}")
+    if _in_app_container():
+        print("\nWarning: this terminal runs inside another app's container, so Windows won't see this\n"
+              "startup entry. Run the command again from Windows Terminal (Start menu > Terminal).")
+        return 1
+    if state == "on":
+        if _tray_running():
+            print("The tray app is already running.")
+        else:
+            _start_tray()
+            print("Started the tray app.")
+    return 0
 
 
 def main(argv=None):

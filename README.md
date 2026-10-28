@@ -41,10 +41,15 @@ pythonw brightness.py
 ### Start with Windows
 
 ```
-py brightness.py autostart on     # or right-click the tray icon → Start with Windows
+py brightness.py autostart on     # also starts the tray app now if it isn't running
 py brightness.py autostart off
 py brightness.py autostart        # show the current setting
 ```
+
+Run these from a normal terminal such as Windows Terminal (or use the tray icon's
+right-click → Start with Windows). A terminal that runs inside another app's container,
+such as the Claude desktop app's, keeps AppData and registry changes private, so Windows
+never sees the startup entry. The command warns you if that happens.
 
 At sign-in, Windows runs a copy of the script kept in `%LOCALAPPDATA%\MonitorBrightness`,
 so startup keeps working even if you move or delete your clone. Whenever you start the
@@ -53,7 +58,10 @@ You can also switch it off in Task Manager → Startup apps.
 
 It idles at about 30 MB of RAM and 0% CPU: nothing polls. A background thread per monitor
 sleeps until you change something, and only the latest value goes to the monitor.
-Errors are logged to `%LOCALAPPDATA%\MonitorBrightness\brightness.log`.
+Activity and errors go to `%LOCALAPPDATA%\MonitorBrightness\brightness.log`, including
+uncaught errors from any thread and a "Quit from the tray menu" line when you quit. Hard
+crashes leave a stack dump in `crash.log` next to it. If the app is gone and neither log
+says why, something outside it ended the process.
 
 ## Command line
 
