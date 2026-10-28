@@ -36,7 +36,9 @@ shutil.copytree(SOURCE, TARGET)
 print(f"Installed plugin to {TARGET}")
 
 if STREAM_DECK.exists():
-    subprocess.Popen([str(STREAM_DECK)], creationflags=subprocess.DETACHED_PROCESS)
+    # Start it through Explorer, like opening it from the Start menu, so it isn't tied to this
+    # terminal (which may close everything it started when the terminal closes).
+    subprocess.Popen(["explorer.exe", str(STREAM_DECK)])
     print("Started Stream Deck. Drag 'Monitor Brightness' from the action list onto a dial.")
 else:
     print("Start Stream Deck to load the plugin.")
